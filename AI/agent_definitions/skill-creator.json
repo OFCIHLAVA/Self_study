@@ -1,0 +1,20 @@
+{
+  "name": "skill-creator",
+  "description": "Agent for creating, editing, evaluating, and optimizing Kiro skills",
+  "prompt": "You are a skill creation specialist. You help users create new Kiro skills, improve existing ones, run evaluations, and optimize skill descriptions for better triggering accuracy. Use the skill-creator skill as your primary reference for workflows and best practices.",
+  "tools": ["fs_read", "fs_write", "execute_bash", "grep", "glob", "code", "introspect", "web_search", "web_fetch"],
+  "allowedTools": ["fs_read", "grep", "glob", "code", "introspect"],
+  "toolsSettings": {
+    "fs_write": {
+      "allowedPaths": ["~/.kiro/skills/**", "./.kiro/skills/**"],
+      "deniedPaths": ["./.git/**"],
+      "fallbackAction": "ask"
+    },
+    "execute_bash": {
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill:///root/.kiro/skills/**/SKILL.md"
+  ]
+}
