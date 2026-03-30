@@ -60,7 +60,19 @@ def _delete(path: str) -> httpx.Response:
 
 @mcp.tool()
 def get_current_user() -> str:
-    """Get the configured Jira username for the current user."""
+    """Get the configured Jira username for the current session.
+
+    Returns the JIRA_USERNAME from the server's environment configuration.
+    Use this to identify who will be the actor for issue assignments, comments,
+    and audit trails. Useful before calling update_issue with an assignee.
+
+    Returns:
+        The Jira username string, or a message indicating no username is configured.
+
+    Example:
+        >>> get_current_user()
+        "john.doe"
+    """
     return JIRA_USERNAME or "No JIRA_USERNAME configured."
 
 
@@ -87,7 +99,28 @@ def _format_links(fields: dict) -> list[str]:
 
 @mcp.tool()
 def get_issue(issue_key: str) -> str:
-    """Get a Jira issue by key (e.g. PROJ-123). Returns summary, status, assignee, description, epic link, linked issues, and comments."""
+    """Retrieve full details of a single Jira issue by its key.
+
+    Fetches comprehensive issue data including summary, status, type, assignee,
+    priority, epic link, all linked issues (with their statuses), the full
+    description, and the last 10 comments. This is the primary tool for
+    inspecting an issue's current state.
+
+    Args:
+        issue_key: The Jira issue key, e.g. "PROJ-123" or "INFR-42".
+
+    Returns:
+        A formatted markdown string containing:
+        - Title line: **PROJ-123: Issue summary**
+        - Status, Type, Assignee, Priority fields
+        - Epic Link (if set) and Linked Issues section
+        - Full description text
+        - Last 10 comments with author names
+
+    Example:
+        >>> get_issue("PROJ-123")
+        "**PROJ-123: Fix login bug**\\nStatus: In Progress\\nType: Bug\\n..."
+    """
     data = _get(f"/issue/{issue_key}", {"expand": "renderedFields"})
     f = data["fields"]
     parts = [
@@ -109,10 +142,24 @@ def get_issue(issue_key: str) -> str:
 
 @mcp.tool()
 def get_issue_links(issue_key: str) -> str:
-    """Get the epic link and all linked issues for a Jira issue.
+    """Retrieve only the epic link and linked issues for a Jira issue.
+
+    A lightweight alternative to get_issue when you only need relationship
+    data. Returns the epic this issue belongs to (via customfield_10005)
+    and all issue links (blocks, relates to, duplicates, etc.) with their
+    summaries and statuses.
 
     Args:
-        issue_key: Issue key (e.g. "PROJ-123")
+        issue_key: The Jira issue key, e.g. "PROJ-123".
+
+    Returns:
+        A formatted markdown string with the issue title, epic link (if any),
+        and a list of linked issues grouped by link direction. Returns
+        "No epic link or linked issues." if none exist.
+
+    Example:
+        >>> get_issue_links("PROJ-123")
+        "**PROJ-123: Fix login bug**\\nEpic Link: PROJ-100\\n\\n## Linked Issues (2)\\n- blocks **PROJ-124**: Deploy fix [Open]\\n- is blocked by **PROJ-122**: Auth refactor [Done]"
     """
     data = _get(f"/issue/{issue_key}", {"fields": "customfield_10005,issuelinks,summary"})
     f = data["fields"]
@@ -127,7 +174,31 @@ def get_issue_links(issue_key: str) -> str:
 
 @mcp.tool()
 def search_issues(jql: str, max_results: int = 10) -> str:
-    """Search Jira issues using JQL. Example: 'project = PROJ AND status = Open'"""
+    """Search for Jira issues using JQL (Jira Query Language).
+
+    Executes a JQL query and returns a summary list of matching issues.
+    Each result includes the issue key, summary, status, and assignee.
+    Use this to find issues by project, status, assignee, labels, or any
+    JQL-supported criteria.
+
+    Args:
+        jql: A valid JQL query string. Supports all standard JQL operators
+             and fields (project, status, assignee, priority, labels, etc.).
+        max_results: Maximum number of issues to return (default 10, max
+                     depends on Jira server config, typically 1000).
+
+    Returns:
+        A formatted markdown string showing total match count and a bullet
+        list of issues with key, summary, status, and assignee. Returns
+        "No issues found." if the query matches nothing.
+
+    Example:
+        >>> search_issues("project = INFR AND status = Open", max_results=5)
+        "Found 42 issues (showing 5):\\n\\n- **INFR-10**: Setup CI pipeline [Open] (john.doe)\\n..."
+
+        >>> search_issues("assignee = currentUser() AND status != Done")
+        "Found 3 issues (showing 3):\\n\\n- **PROJ-5**: Review PR [In Review] (jane.smith)\\n..."
+    """
     data = _get(
         "/search",
         {
@@ -150,7 +221,28 @@ def search_issues(jql: str, max_results: int = 10) -> str:
 
 @mcp.tool()
 def get_transitions(issue_key: str) -> str:
-    """Get available status transitions for an issue."""
+    """Get the available workflow transitions for a Jira issue.
+
+    Returns the list of status transitions that can be performed on the
+    issue in its current state. Each transition includes its name and ID.
+    Use the transition IDs with the Jira API to move issues through the
+    workflow (e.g. "To Do" -> "In Progress" -> "Done").
+
+    Note: Available transitions depend on the issue's current status and
+    the project's workflow configuration.
+
+    Args:
+        issue_key: The Jira issue key, e.g. "PROJ-123".
+
+    Returns:
+        A newline-separated list of transitions in the format
+        "- TransitionName (id: 123)", or "No transitions available."
+        if the issue has no valid transitions from its current state.
+
+    Example:
+        >>> get_transitions("PROJ-123")
+        "- Start Progress (id: 21)\\n- Done (id: 31)\\n- Won't Fix (id: 41)"
+    """
     data = _get(f"/issue/{issue_key}/transitions")
     if not data.get("transitions"):
         return "No transitions available."
@@ -166,15 +258,37 @@ def create_issue(
     components: list[str] | None = None,
     epic_link: str | None = None,
 ) -> str:
-    """Create a new Jira issue. Returns the created issue key.
+    """Create a new Jira issue in the specified project.
+
+    Creates an issue with the given fields and returns the newly created
+    issue key. Supports setting the issue type, description, components,
+    and epic link at creation time. For additional fields (assignee, priority,
+    labels), use update_issue after creation.
 
     Args:
-        project_key: Jira project key (e.g. "INFR")
-        summary: Issue summary/title
-        issue_type: Issue type name (default "Task")
-        description: Issue description
-        components: List of component names
-        epic_link: Epic issue key to link this issue to (e.g. "PROJ-100"). Uses customfield_10005 (Epic Link).
+        project_key: The Jira project key where the issue will be created,
+                     e.g. "INFR", "PROJ".
+        summary: The issue title/summary. Keep it concise and descriptive.
+        issue_type: The issue type name (default "Task"). Common values:
+                    "Task", "Bug", "Story", "Epic", "Sub-task".
+                    Must match an issue type configured in the target project.
+        description: Plain-text issue description body. Supports Jira wiki
+                     markup for formatting.
+        components: Optional list of component names to assign, e.g.
+                    ["Backend", "API"]. Components must already exist in
+                    the project.
+        epic_link: Optional epic issue key to link this issue under, e.g.
+                   "PROJ-100". Sets the Epic Link field (customfield_10005).
+
+    Returns:
+        A confirmation string with the created issue key and summary,
+        e.g. "Created PROJ-456: Implement caching layer".
+
+    Example:
+        >>> create_issue("INFR", "Setup monitoring dashboard", issue_type="Task",
+        ...              description="Deploy Grafana dashboards for prod",
+        ...              components=["Monitoring"], epic_link="INFR-10")
+        "Created INFR-55: Setup monitoring dashboard"
     """
     fields = {
         "project": {"key": project_key},
@@ -195,13 +309,32 @@ def create_issue(
 def add_issue_link(
     inward_issue: str, outward_issue: str, link_type: str = "Relates"
 ) -> str:
-    """Add a link between two Jira issues.
+    """Create a link between two existing Jira issues.
+
+    Establishes a typed relationship between two issues. The link direction
+    matters — for directional link types like "Blocks", the inward_issue
+    receives the inward label and the outward_issue receives the outward label.
+
+    Common link types and their semantics:
+    - "Relates": inward_issue "relates to" outward_issue (symmetric).
+    - "Blocks": outward_issue "blocks" inward_issue; inward_issue "is blocked by" outward_issue.
+    - "Cloners": inward_issue "is cloned by" outward_issue.
+    - "Duplicate": inward_issue "is duplicated by" outward_issue.
 
     Args:
-        inward_issue: The issue key for the inward side (e.g. "PROJ-1")
-        outward_issue: The issue key for the outward side (e.g. "PROJ-2")
-        link_type: Link type name. Common values: "Relates", "Blocks", "Cloners", "Duplicate", "Epic-Story Link".
-                   For "Blocks": inward_issue "is blocked by" outward_issue, outward_issue "blocks" inward_issue.
+        inward_issue: The issue key for the inward side of the link, e.g. "PROJ-1".
+        outward_issue: The issue key for the outward side of the link, e.g. "PROJ-2".
+        link_type: The link type name (default "Relates"). Must match a link type
+                   configured in the Jira instance. Use get_issue_links to see
+                   existing link types on issues.
+
+    Returns:
+        A confirmation string, e.g. "Linked PROJ-1 <-> PROJ-2 (type: Blocks)".
+
+    Example:
+        >>> add_issue_link("PROJ-2", "PROJ-1", link_type="Blocks")
+        "Linked PROJ-2 <-> PROJ-1 (type: Blocks)"
+        # Result: PROJ-1 "blocks" PROJ-2; PROJ-2 "is blocked by" PROJ-1
     """
     payload = {
         "type": {"name": link_type},
@@ -230,17 +363,42 @@ def update_issue(
     epic_link: str | None = None,
     labels: list[str] | None = None,
 ) -> str:
-    """Update fields on an existing Jira issue. Only provided fields are changed.
+    """Update one or more fields on an existing Jira issue.
+
+    Only the fields you provide will be modified — all other fields remain
+    unchanged. Pass an empty string for assignee to unassign, or an empty
+    string for epic_link to remove the epic association.
+
+    Note: This does NOT change issue status. Use get_transitions to find
+    available transitions and the Jira transition API to move issues through
+    the workflow.
 
     Args:
-        issue_key: Issue key (e.g. "PROJ-123")
-        summary: New summary/title
-        description: New description
-        assignee: Username to assign (use "" to unassign)
-        priority: Priority name (e.g. "High", "Medium")
-        components: Replace components list (component names)
-        epic_link: Epic issue key (customfield_10005)
-        labels: Replace labels list
+        issue_key: The Jira issue key to update, e.g. "PROJ-123".
+        summary: New issue title/summary. None to leave unchanged.
+        description: New description body (Jira wiki markup). None to leave unchanged.
+        assignee: Jira username to assign. Use "" (empty string) to unassign.
+                  None to leave unchanged. Use get_current_user to get your username.
+        priority: Priority name, e.g. "Highest", "High", "Medium", "Low", "Lowest".
+                  None to leave unchanged.
+        components: Full replacement list of component names, e.g. ["Backend", "API"].
+                    This replaces all existing components. None to leave unchanged.
+        epic_link: Epic issue key to set (customfield_10005), e.g. "PROJ-100".
+                   Use "" (empty string) to remove the epic link. None to leave unchanged.
+        labels: Full replacement list of labels, e.g. ["urgent", "backend"].
+                This replaces all existing labels. None to leave unchanged.
+
+    Returns:
+        A confirmation string "Updated PROJ-123", or "No fields to update."
+        if all arguments are None.
+
+    Example:
+        >>> update_issue("PROJ-123", assignee="john.doe", priority="High",
+        ...              labels=["urgent", "backend"])
+        "Updated PROJ-123"
+
+        >>> update_issue("PROJ-123", assignee="")  # unassign
+        "Updated PROJ-123"
     """
     fields: dict = {}
     if summary is not None:
@@ -265,11 +423,28 @@ def update_issue(
 
 @mcp.tool()
 def delete_issue(issue_key: str, delete_subtasks: bool = False) -> str:
-    """Delete a Jira issue.
+    """Permanently delete a Jira issue.
+
+    WARNING: This action is irreversible. The issue and all its data
+    (comments, attachments, worklogs) will be permanently removed.
+    If the issue has subtasks, you must set delete_subtasks=True or
+    the deletion will fail.
 
     Args:
-        issue_key: Issue key to delete (e.g. "PROJ-123")
-        delete_subtasks: Also delete subtasks (default False)
+        issue_key: The Jira issue key to delete, e.g. "PROJ-123".
+        delete_subtasks: If True, also delete all subtasks of this issue.
+                         If False (default) and the issue has subtasks,
+                         the Jira API will return an error.
+
+    Returns:
+        A confirmation string, e.g. "Deleted PROJ-123".
+
+    Example:
+        >>> delete_issue("PROJ-123")
+        "Deleted PROJ-123"
+
+        >>> delete_issue("PROJ-100", delete_subtasks=True)
+        "Deleted PROJ-100"
     """
     path = f"/issue/{issue_key}?deleteSubtasks={'true' if delete_subtasks else 'false'}"
     _delete(path)
