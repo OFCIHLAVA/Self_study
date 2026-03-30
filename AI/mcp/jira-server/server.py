@@ -64,9 +64,30 @@ def get_current_user() -> str:
     return JIRA_USERNAME or "No JIRA_USERNAME configured."
 
 
+def _format_links(fields: dict) -> list[str]:
+    """Extract epic link and issue links from fields."""
+    parts = []
+    epic = fields.get("customfield_10005")
+    if epic:
+        parts.append(f"Epic Link: {epic}")
+    links = fields.get("issuelinks") or []
+    if links:
+        parts.append(f"\n## Linked Issues ({len(links)})")
+        for link in links:
+            if "inwardIssue" in link:
+                i = link["inwardIssue"]
+                direction = link["type"]["inward"]
+                parts.append(f"- {direction} **{i['key']}**: {i['fields']['summary']} [{i['fields']['status']['name']}]")
+            elif "outwardIssue" in link:
+                o = link["outwardIssue"]
+                direction = link["type"]["outward"]
+                parts.append(f"- {direction} **{o['key']}**: {o['fields']['summary']} [{o['fields']['status']['name']}]")
+    return parts
+
+
 @mcp.tool()
 def get_issue(issue_key: str) -> str:
-    """Get a Jira issue by key (e.g. PROJ-123). Returns summary, status, assignee, description, and comments."""
+    """Get a Jira issue by key (e.g. PROJ-123). Returns summary, status, assignee, description, epic link, linked issues, and comments."""
     data = _get(f"/issue/{issue_key}", {"expand": "renderedFields"})
     f = data["fields"]
     parts = [
@@ -75,13 +96,32 @@ def get_issue(issue_key: str) -> str:
         f"Type: {f.get('issuetype', {}).get('name', '?')}",
         f"Assignee: {(f.get('assignee') or {}).get('displayName', 'Unassigned')}",
         f"Priority: {(f.get('priority') or {}).get('name', '?')}",
-        f"\n## Description\n{f.get('description') or 'No description'}",
     ]
+    parts.extend(_format_links(f))
+    parts.append(f"\n## Description\n{f.get('description') or 'No description'}")
     comments = (f.get("comment") or {}).get("comments", [])
     if comments:
         parts.append(f"\n## Comments ({len(comments)})")
         for c in comments[-10:]:
             parts.append(f"- **{c['author']['displayName']}**: {c.get('body', '')}")
+    return "\n".join(parts)
+
+
+@mcp.tool()
+def get_issue_links(issue_key: str) -> str:
+    """Get the epic link and all linked issues for a Jira issue.
+
+    Args:
+        issue_key: Issue key (e.g. "PROJ-123")
+    """
+    data = _get(f"/issue/{issue_key}", {"fields": "customfield_10005,issuelinks,summary"})
+    f = data["fields"]
+    parts = [f"**{issue_key}: {f.get('summary', '')}**"]
+    link_parts = _format_links(f)
+    if link_parts:
+        parts.extend(link_parts)
+    else:
+        parts.append("No epic link or linked issues.")
     return "\n".join(parts)
 
 
